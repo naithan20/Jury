@@ -14,15 +14,16 @@ improvement tip. No account required.
   status-sensitive, trust-sensitive, aesthetic-focused, warmth-focused) with
   different priorities, simulated heterogeneously.
 - **One model call** (`src/app/api/jury/route.ts`) — both images and a
-  structured prompt go to a single `generateObject` call via the
-  [Vercel AI Gateway](https://vercel.com/docs/ai-gateway), which reasons
-  through all 8 personas and returns a strict, zod-validated JSON verdict
-  (vote split, reasons, segments, confidence, improvement tip). No 100
-  separate model calls, no database.
-- Default model is `google/gemini-3.1-flash-lite` — the cheapest current
-  vision-capable model on the Gateway, chosen to stretch Vercel's free
-  monthly Gateway credit as far as possible while validating the product.
-  Override with `JURY_MODEL`.
+  structured prompt go to a single `generateObject` call against the
+  [Gemini Developer API](https://ai.google.dev/gemini-api/docs) (Google AI
+  Studio's free-tier endpoint, called directly — no Vercel AI Gateway, no
+  Vertex AI, no billing account), which reasons through all 8 personas and
+  returns a strict, zod-validated JSON verdict (vote split, reasons,
+  segments, confidence, improvement tip). No 100 separate model calls, no
+  database.
+- Default model is `gemini-2.5-flash-lite` — the Gemini model with the most
+  generous free-tier quota that still supports image input. Override with
+  `JURY_MODEL`.
 - Images never touch disk — they're compressed client-side, sent as base64
   to the API route, and never stored.
 - **Challenge Someone** — the winning image + context are encoded into a URL
@@ -36,24 +37,24 @@ npm install
 npm run dev
 ```
 
-Requires an `AI_GATEWAY_API_KEY` to actually get verdicts, both locally and
-on Vercel:
+Requires a `GOOGLE_GENERATIVE_AI_API_KEY` to actually get verdicts, both
+locally and on Vercel:
 
-1. In the Vercel dashboard, open the project → **AI** → **API Keys** → **Create Key**.
-2. Copy the key.
-3. Project → **Settings** → **Environment Variables** → add `AI_GATEWAY_API_KEY`
-   with that value (all environments) → **Save** → redeploy.
-4. For local dev, put the same value in `.env.local`.
+1. Create a free key at [Google AI Studio](https://aistudio.google.com/apikey)
+   — no credit card, no billing account.
+2. Vercel dashboard → JURY project → **Settings** → **Environment Variables**
+   → add `GOOGLE_GENERATIVE_AI_API_KEY` with that value (all environments) →
+   **Save** → redeploy.
+3. For local dev, put the same value in `.env.local`.
 
-This uses Vercel's own provider relationship — you do **not** need your own
-Anthropic/OpenAI/Google API key. Usage is billed against Vercel's free
-$5/month AI Gateway credit; a single jury run costs a small fraction of a
-cent on `google/gemini-3.1-flash-lite`.
+This calls Google's free Gemini API tier directly — no Vercel AI Gateway
+account, no Anthropic/OpenAI key, no payment card of any kind.
 
 Optional: override the model with `JURY_MODEL` (defaults to
-`google/gemini-3.1-flash-lite`).
+`gemini-2.5-flash-lite`).
 
 ## Stack
 
-Next.js (App Router) + TypeScript + Tailwind CSS v4 + the Vercel AI SDK.
+Next.js (App Router) + TypeScript + Tailwind CSS v4 + the Vercel AI SDK
+(`ai` + `@ai-sdk/google`, calling the Gemini Developer API directly).
 Mobile-first, dark, no required database for V1.

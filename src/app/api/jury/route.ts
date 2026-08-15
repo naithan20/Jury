@@ -1,4 +1,5 @@
 import { generateObject } from "ai";
+import { google } from "@ai-sdk/google";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { normalizeJuryResult } from "@/lib/jury/normalize";
@@ -14,10 +15,12 @@ const requestSchema = z.object({
   imageB: z.string().startsWith("data:image/"),
 });
 
-// Google's cheapest current vision-capable model — a jury call costs a
-// fraction of a cent, which stretches Vercel AI Gateway's free monthly
-// credit across thousands of runs. Override with JURY_MODEL if needed.
-const MODEL = process.env.JURY_MODEL || "google/gemini-3.1-flash-lite";
+// Direct Gemini Developer API (generativelanguage.googleapis.com) — the
+// free-tier endpoint, not Vertex AI, and not routed through Vercel AI
+// Gateway. Reads GOOGLE_GENERATIVE_AI_API_KEY automatically. Flash-Lite has
+// the most generous free-tier quota of the vision-capable Gemini models.
+// Override with JURY_MODEL if needed.
+const MODEL = google(process.env.JURY_MODEL || "gemini-2.5-flash-lite");
 
 /**
  * Deliberately duck-typed rather than using instanceof/isInstance checks:
@@ -105,7 +108,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "The jury couldn't reach a verdict right now. Please try again in a moment — if this keeps happening, the deployment's AI Gateway setup needs attention.",
+          "The jury couldn't reach a verdict right now. Please try again in a moment — if this keeps happening, the deployment's AI setup needs attention.",
       },
       { status: 502 },
     );
