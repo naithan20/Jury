@@ -1,5 +1,5 @@
 import { extractJsonMiddleware, generateObject, wrapLanguageModel } from "ai";
-import { openrouter } from "@openrouter/ai-sdk-provider";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { normalizeJuryResult } from "@/lib/jury/normalize";
@@ -15,19 +15,28 @@ const requestSchema = z.object({
   imageB: z.string().startsWith("data:image/"),
 });
 
+// Two deliberately separate things: OPENROUTER_API_KEY is ONLY ever read
+// here, for authentication. The model ID is a hardcoded literal below — not
+// sourced from any environment variable — so a misconfigured env var (e.g.
+// one accidentally holding the text "OPENROUTER_API_KEY") can never end up
+// in the model slot. Reliability over configurability for this MVP.
+const SELECTED_MODEL = "openrouter/free";
+
+const openrouter = createOpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
+
 // OpenRouter's Free Models Router — picks a $0 model per request, filtered
 // to whatever the request actually needs (here: image input + structured
 // output), so it won't hand this call to a text-only free model. No Vercel
 // AI Gateway, no Gemini/Vertex, no card on file anywhere in this path.
-// Reads OPENROUTER_API_KEY automatically. Override with JURY_MODEL to pin a
-// specific free model instead (e.g. "google/gemma-4-31b-it:free").
 //
 // Free models aren't guaranteed to honor response_format strictly, so
 // extractJsonMiddleware strips markdown fences / surrounding prose from the
 // raw completion before it's parsed against the schema below — a local
 // text fixup, not an extra model call.
 const MODEL = wrapLanguageModel({
-  model: openrouter(process.env.JURY_MODEL || "openrouter/free"),
+  model: openrouter(SELECTED_MODEL),
   middleware: extractJsonMiddleware(),
 });
 
@@ -101,6 +110,12 @@ export async function POST(req: NextRequest) {
       ],
     },
   ];
+
+  console.log("JURY request:", {
+    selectedModel: SELECTED_MODEL,
+    hasOpenRouterKey: Boolean(process.env.OPENROUTER_API_KEY),
+    nodeEnv: process.env.NODE_ENV,
+  });
 
   // Free open models don't reliably honor response_format, so a first
   // attempt occasionally comes back as unparsable/invalid JSON. One bounded

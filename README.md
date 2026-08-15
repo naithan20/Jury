@@ -56,8 +56,10 @@ Free-tier limits (per OpenRouter, subject to change): 20 requests/minute,
 50 requests/day without ever purchasing credits (1,000/day if you later
 choose to add credits — never required to start).
 
-Optional: override the model with `JURY_MODEL` to pin a specific free model
-instead of the auto-router (e.g. `google/gemma-4-31b-it:free`).
+The model ID (`openrouter/free`) is hardcoded in `src/app/api/jury/route.ts`,
+not read from an environment variable — `OPENROUTER_API_KEY` is used only
+for authentication. This is deliberate: it rules out a misconfigured env
+var ever being passed as a model ID.
 
 ## Stack
 
