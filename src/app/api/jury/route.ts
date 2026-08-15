@@ -14,7 +14,34 @@ const requestSchema = z.object({
   imageB: z.string().startsWith("data:image/"),
 });
 
-const MODEL = process.env.JURY_MODEL || "anthropic/claude-haiku-4.5";
+// Google's cheapest current vision-capable model — a jury call costs a
+// fraction of a cent, which stretches Vercel AI Gateway's free monthly
+// credit across thousands of runs. Override with JURY_MODEL if needed.
+const MODEL = process.env.JURY_MODEL || "google/gemini-3.1-flash-lite";
+
+/**
+ * Deliberately duck-typed rather than using instanceof/isInstance checks:
+ * bundlers can end up with more than one loaded copy of the AI SDK's error
+ * classes, which makes those checks unreliable. Property presence is not.
+ */
+function logGenerationFailure(err: unknown) {
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    console.error("JURY generation failed:", {
+      name: e.name ?? err.constructor?.name,
+      message: e.message,
+      statusCode: e.statusCode,
+      type: e.type,
+      isRetryable: e.isRetryable,
+      url: e.url,
+      responseBody:
+        typeof e.responseBody === "string" ? e.responseBody.slice(0, 2000) : undefined,
+      cause: e.cause instanceof Error ? { name: e.cause.name, message: e.cause.message } : e.cause,
+    });
+    return;
+  }
+  console.error("JURY generation failed [non-error thrown]:", err);
+}
 
 function parseDataUrl(dataUrl: string): { mediaType: string; base64: string } | null {
   const match = /^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/.exec(dataUrl);
@@ -74,11 +101,11 @@ export async function POST(req: NextRequest) {
     const result = normalizeJuryResult(object);
     return NextResponse.json({ result });
   } catch (err) {
-    console.error("JURY generation failed:", err);
+    logGenerationFailure(err);
     return NextResponse.json(
       {
         error:
-          "The jury couldn't reach a verdict right now. This usually means the AI Gateway isn't configured yet — check the deployment's environment variables.",
+          "The jury couldn't reach a verdict right now. Please try again in a moment — if this keeps happening, the deployment's AI Gateway setup needs attention.",
       },
       { status: 502 },
     );

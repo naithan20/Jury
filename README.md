@@ -19,6 +19,10 @@ improvement tip. No account required.
   through all 8 personas and returns a strict, zod-validated JSON verdict
   (vote split, reasons, segments, confidence, improvement tip). No 100
   separate model calls, no database.
+- Default model is `google/gemini-3.1-flash-lite` — the cheapest current
+  vision-capable model on the Gateway, chosen to stretch Vercel's free
+  monthly Gateway credit as far as possible while validating the product.
+  Override with `JURY_MODEL`.
 - Images never touch disk — they're compressed client-side, sent as base64
   to the API route, and never stored.
 - **Challenge Someone** — the winning image + context are encoded into a URL
@@ -32,15 +36,22 @@ npm install
 npm run dev
 ```
 
-Requires an AI Gateway credential to actually get verdicts:
+Requires an `AI_GATEWAY_API_KEY` to actually get verdicts, both locally and
+on Vercel:
 
-- Deployed on Vercel: nothing to do — Vercel injects AI Gateway credentials
-  automatically.
-- Local dev / elsewhere: set `AI_GATEWAY_API_KEY` in `.env.local` (get one
-  from https://vercel.com/docs/ai-gateway).
+1. In the Vercel dashboard, open the project → **AI** → **API Keys** → **Create Key**.
+2. Copy the key.
+3. Project → **Settings** → **Environment Variables** → add `AI_GATEWAY_API_KEY`
+   with that value (all environments) → **Save** → redeploy.
+4. For local dev, put the same value in `.env.local`.
+
+This uses Vercel's own provider relationship — you do **not** need your own
+Anthropic/OpenAI/Google API key. Usage is billed against Vercel's free
+$5/month AI Gateway credit; a single jury run costs a small fraction of a
+cent on `google/gemini-3.1-flash-lite`.
 
 Optional: override the model with `JURY_MODEL` (defaults to
-`anthropic/claude-haiku-4.5`).
+`google/gemini-3.1-flash-lite`).
 
 ## Stack
 
