@@ -99,15 +99,20 @@ export function ShareActions({
         SHARE RESULT
       </button>
 
-      <button
-        type="button"
-        onClick={handleChallenge}
-        disabled={busy}
-        className="w-full rounded-full border py-3 text-sm font-semibold transition-colors active:scale-[0.98] disabled:opacity-60"
-        style={{ borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-      >
-        Challenge Someone
-      </button>
+      <div>
+        <p className="mb-1.5 text-center text-xs uppercase tracking-wide" style={{ color: "var(--accent-gold)" }}>
+          Think the jury is wrong?
+        </p>
+        <button
+          type="button"
+          onClick={handleChallenge}
+          disabled={busy}
+          className="verdict-font w-full rounded-full border-2 py-3 text-base tracking-wide transition-colors active:scale-[0.98] disabled:opacity-60"
+          style={{ borderColor: "var(--accent-gold)", color: "var(--accent-gold)" }}
+        >
+          CHALLENGE THE VERDICT
+        </button>
+      </div>
 
       <button
         type="button"
