@@ -14,16 +14,20 @@ improvement tip. No account required.
   status-sensitive, trust-sensitive, aesthetic-focused, warmth-focused) with
   different priorities, simulated heterogeneously.
 - **One model call** (`src/app/api/jury/route.ts`) — both images and a
-  structured prompt go to a single `generateObject` call against the
-  [Gemini Developer API](https://ai.google.dev/gemini-api/docs) (Google AI
-  Studio's free-tier endpoint, called directly — no Vercel AI Gateway, no
-  Vertex AI, no billing account), which reasons through all 8 personas and
+  structured prompt go to a single `generateObject` call against
+  [OpenRouter's Free Models Router](https://openrouter.ai/openrouter/free)
+  (`openrouter/free`), which auto-selects a $0 model per request filtered to
+  whatever the request needs (here: image input + structured output). No
+  Vercel AI Gateway, no Gemini/Vertex, no Anthropic/OpenAI key, no card on
+  file anywhere in this path. The model reasons through all 8 personas and
   returns a strict, zod-validated JSON verdict (vote split, reasons,
   segments, confidence, improvement tip). No 100 separate model calls, no
   database.
-- Default model is `gemini-2.5-flash-lite` — the Gemini model with the most
-  generous free-tier quota that still supports image input. Override with
-  `JURY_MODEL`.
+- Free open models don't reliably honor structured-output formatting, so
+  `extractJsonMiddleware` strips markdown fences/prose from the raw
+  completion before it's parsed, and a single bounded retry (never more)
+  fires only on a genuine parse/validation failure — not on auth or
+  rate-limit errors, where a retry can't help.
 - Images never touch disk — they're compressed client-side, sent as base64
   to the API route, and never stored.
 - **Challenge Someone** — the winning image + context are encoded into a URL
@@ -37,24 +41,26 @@ npm install
 npm run dev
 ```
 
-Requires a `GOOGLE_GENERATIVE_AI_API_KEY` to actually get verdicts, both
-locally and on Vercel:
+Requires an `OPENROUTER_API_KEY` to actually get verdicts, both locally and
+on Vercel:
 
-1. Create a free key at [Google AI Studio](https://aistudio.google.com/apikey)
-   — no credit card, no billing account.
+1. Create a free account and API key at
+   [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) — no
+   credit card required to use free (`:free`) models.
 2. Vercel dashboard → JURY project → **Settings** → **Environment Variables**
-   → add `GOOGLE_GENERATIVE_AI_API_KEY` with that value (all environments) →
+   → add `OPENROUTER_API_KEY` with that value (all environments) →
    **Save** → redeploy.
 3. For local dev, put the same value in `.env.local`.
 
-This calls Google's free Gemini API tier directly — no Vercel AI Gateway
-account, no Anthropic/OpenAI key, no payment card of any kind.
+Free-tier limits (per OpenRouter, subject to change): 20 requests/minute,
+50 requests/day without ever purchasing credits (1,000/day if you later
+choose to add credits — never required to start).
 
-Optional: override the model with `JURY_MODEL` (defaults to
-`gemini-2.5-flash-lite`).
+Optional: override the model with `JURY_MODEL` to pin a specific free model
+instead of the auto-router (e.g. `google/gemma-4-31b-it:free`).
 
 ## Stack
 
 Next.js (App Router) + TypeScript + Tailwind CSS v4 + the Vercel AI SDK
-(`ai` + `@ai-sdk/google`, calling the Gemini Developer API directly).
+(`ai` + `@openrouter/ai-sdk-provider`, calling OpenRouter's API directly).
 Mobile-first, dark, no required database for V1.
