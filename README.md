@@ -13,8 +13,11 @@ improvement tip. No account required.
 - **Personas** — 8 archetypes (bold, reserved, socially-driven, analytical,
   status-sensitive, trust-sensitive, aesthetic-focused, warmth-focused) with
   different priorities, simulated heterogeneously.
-- **One model call** (`src/app/api/jury/route.ts`) — both images and a
-  structured prompt go to a single `generateObject` call against
+- **One evaluation engine, two entry points** (`src/lib/jury/runEvaluation.ts`)
+  — the browser UI's `POST /api/jury` and the agent-facing
+  `POST /api/agent/evaluate` (see below) both call the exact same
+  evaluation function. Both images and a structured prompt go to a single
+  `generateObject` call against
   [OpenRouter's Free Models Router](https://openrouter.ai/openrouter/free)
   (`openrouter/free`), which auto-selects a $0 model per request filtered to
   whatever the request needs (here: image input + structured output). No
@@ -56,10 +59,35 @@ Free-tier limits (per OpenRouter, subject to change): 20 requests/minute,
 50 requests/day without ever purchasing credits (1,000/day if you later
 choose to add credits — never required to start).
 
-The model ID (`openrouter/free`) is hardcoded in `src/app/api/jury/route.ts`,
+The model ID (`openrouter/free`) is hardcoded in `src/lib/jury/model.ts`,
 not read from an environment variable — `OPENROUTER_API_KEY` is used only
 for authentication. This is deliberate: it rules out a misconfigured env
 var ever being passed as a model ID.
+
+## Agent API
+
+`POST /api/agent/evaluate` exposes the same real evaluation engine as the
+human UI to machine callers (see `.env.example` for `AGENT_API_KEY` setup).
+It requires a Bearer token (fails closed — refuses every request with 503
+if `AGENT_API_KEY` isn't set) and applies its own per-key rate limit
+(10 requests/10 min), independent of the browser UI, so an autonomous
+caller can't exhaust the shared OpenRouter free-tier quota real users
+depend on. See `src/app/api/agent/evaluate/route.ts` for the exact
+request/response contract and `route.test.ts` alongside it for the
+auth/rate-limit/malicious-input test coverage.
+
+## Testing
+
+```bash
+npm test
+```
+
+Runs the vitest suite (`src/**/*.test.ts`): route-level tests for both
+`/api/jury` and `/api/agent/evaluate` (auth, rate limiting, malformed and
+malicious input, secret-leakage checks), the shared evaluation engine's
+retry-bound behavior, and the rate limiter/auth helpers — all against a
+mocked language model (`ai/test`'s `MockLanguageModelV4`), so tests never
+make real network calls or consume the OpenRouter quota.
 
 ## Stack
 

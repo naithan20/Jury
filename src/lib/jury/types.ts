@@ -98,6 +98,15 @@ export const PERSONAS = [
 
 export type PersonaId = (typeof PERSONAS)[number]["id"];
 
+// Shared by every entry point that accepts an evaluation request (the
+// browser UI's /api/jury and the agent-facing /api/agent/evaluate) — one
+// validation contract, not two that could quietly drift apart.
+export const evaluationRequestSchema = z.object({
+  context: z.enum(CONTEXTS),
+  imageA: z.string().startsWith("data:image/"),
+  imageB: z.string().startsWith("data:image/"),
+});
+
 export const juryResultSchema = z.object({
   votesA: z
     .number()
