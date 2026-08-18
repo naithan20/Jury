@@ -1,0 +1,157 @@
+name: JURY Production Health Check (manual, single request)
+
+# Manual-only, single-shot production health check for
+# POST https://tryjury.vercel.app/api/agent/evaluate.
+#
+# This workflow does NOT touch JURY's application code or environment
+# variables, does NOT use AgentGraph, and makes exactly ONE HTTP request
+# with no retries. It never triggers itself automatically (workflow_dispatch
+# only — no push/schedule/PR triggers), so it only ever runs when a human
+# taps "Run workflow".
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Belt-and-braces against accidentally queuing a second overlapping run from
+# a double-tap — does not change the "one request per run" guarantee below,
+# just avoids two runs racing each other.
+concurrency:
+  group: jury-prod-health-check
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    # Hard ceiling well above the single request's own --max-time (65s)
+    # plus setup overhead — this is a safety bound on the job, not a retry
+    # mechanism. If it's ever hit, the job simply fails; nothing reruns.
+    timeout-minutes: 3
+    steps:
+      - name: Check out fixture image only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/workflows/fixtures
+          sparse-checkout-cone-mode: false
+
+      - name: Make exactly one request to the live agent endpoint
+        run: |
+          set -uo pipefail
+
+          FIXTURE=".github/workflows/fixtures/tiny-benign-pixel.png"
+          if [ ! -f "$FIXTURE" ]; then
+            echo "Fixture image missing at $FIXTURE — aborting without making any request." >&2
+            exit 1
+          fi
+
+          # Base64 is computed at runtime from a committed binary fixture
+          # (a real 1x1 PNG) rather than being written out literally here,
+          # so the payload text never appears in the workflow source or the
+          # step's echoed script — only this derived variable, which is
+          # never printed below.
+          IMG_B64=$(base64 -w0 "$FIXTURE")
+          IMG_DATA_URL="data:image/png;base64,${IMG_B64}"
+
+          PAYLOAD_FILE=$(mktemp)
+          BODY_FILE=$(mktemp)
+          jq -n --arg ctx "professional" --arg img "$IMG_DATA_URL" \
+            '{context: $ctx, imageA: $img, imageB: $img}' > "$PAYLOAD_FILE"
+
+          # Exactly ONE request: no --retry, no loop, no matrix. --max-time
+          # bounds this single attempt to just past the route's own 60s
+          # maxDuration, so a curl-level timeout can be told apart from a
+          # real platform 504 below.
+          CURL_EXIT=0
+          HTTP_META=$(curl -sS -o "$BODY_FILE" \
+            -w '%{http_code}|%{time_total}|%{content_type}' \
+            --max-time 65 \
+            -X POST "https://tryjury.vercel.app/api/agent/evaluate" \
+            -H "Content-Type: application/json" \
+            --data "@$PAYLOAD_FILE") || CURL_EXIT=$?
+
+          HTTP_CODE=$(cut -d'|' -f1 <<< "$HTTP_META")
+          TIME_TOTAL=$(cut -d'|' -f2 <<< "$HTTP_META")
+          CONTENT_TYPE=$(cut -d'|' -f3 <<< "$HTTP_META")
+
+          IS_JSON="no"
+          OK_FIELD=""
+          VOTES_A=""
+          VOTES_B=""
+          WINNER=""
+          CONFIDENCE=""
+          ERROR_CODE=""
+          ERROR_MSG=""
+
+          if grep -qi "application/json" <<< "$CONTENT_TYPE"; then
+            IS_JSON="yes"
+            OK_FIELD=$(jq -r 'if has("ok") then (.ok|tostring) else "missing" end' "$BODY_FILE" 2>/dev/null || echo "unparseable")
+            VOTES_A=$(jq -r '.result.votesA // empty' "$BODY_FILE" 2>/dev/null)
+            VOTES_B=$(jq -r '.result.votesB // empty' "$BODY_FILE" 2>/dev/null)
+            WINNER=$(jq -r '.result.winner // empty' "$BODY_FILE" 2>/dev/null)
+            CONFIDENCE=$(jq -r '.result.confidence // empty' "$BODY_FILE" 2>/dev/null)
+            ERROR_CODE=$(jq -r '.error.code // empty' "$BODY_FILE" 2>/dev/null)
+            ERROR_MSG=$(jq -r '.error.message // empty' "$BODY_FILE" 2>/dev/null)
+          fi
+
+          # Response-shape check against the published contract: success
+          # replies are {ok:true, version, result:{...}}, failures are
+          # {ok:false, version, error:{code, message}}. Anything else
+          # (HTML, empty body, missing "ok"/"version") is flagged as
+          # non-conformant rather than guessed at.
+          VERSION_FIELD=$(jq -r '.version // empty' "$BODY_FILE" 2>/dev/null)
+          CONTRACT_CONFORMS="no"
+          if [ "$IS_JSON" = "yes" ] && [ -n "$VERSION_FIELD" ]; then
+            if [ "$OK_FIELD" = "true" ] && [ -n "$WINNER" ]; then
+              CONTRACT_CONFORMS="yes"
+            elif [ "$OK_FIELD" = "false" ] && [ -n "$ERROR_CODE" ]; then
+              CONTRACT_CONFORMS="yes"
+            fi
+          fi
+
+          VERDICT="UNKNOWN"
+          if [ "$CURL_EXIT" != "0" ]; then
+            VERDICT="REQUEST_FAILED (curl exit $CURL_EXIT — connection-level failure, DNS/TLS error, or hit the 65s client-side cap before any HTTP response)"
+          elif [ "$HTTP_CODE" = "200" ] && [ "$OK_FIELD" = "true" ] && [ -n "$WINNER" ]; then
+            VERDICT="PROVIDER_HEALTHY — 200 with a valid JuryResult"
+          elif [ "$HTTP_CODE" = "502" ] && [ "$ERROR_CODE" = "UPSTREAM_ERROR" ]; then
+            VERDICT="TIMEOUT_CONTROL_WORKING_BUT_UPSTREAM_UNHEALTHY — structured 502 returned before any platform timeout"
+          elif [ "$HTTP_CODE" = "504" ]; then
+            VERDICT="FIX_NOT_EFFECTIVE — raw/bare 504 (platform-level timeout, not our structured error)"
+          elif [ "$HTTP_CODE" = "429" ]; then
+            VERDICT="RATE_LIMITED_OR_QUOTA — 429, do not retry"
+          elif [ "$HTTP_CODE" = "503" ] && [ "$ERROR_CODE" = "PUBLIC_ACCESS_DISABLED" ]; then
+            VERDICT="PUBLIC_ACCESS_INTENTIONALLY_DISABLED — 503 kill switch is on"
+          else
+            VERDICT="UNEXPECTED_RESPONSE — see fields above, does not match a known outcome bucket"
+          fi
+
+          {
+            echo "## JURY production health check — single request result"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| HTTP status | $HTTP_CODE |"
+            echo "| Total duration | ${TIME_TOTAL}s |"
+            echo "| Content-Type | $CONTENT_TYPE |"
+            echo "| Response looked like JSON | $IS_JSON |"
+            echo "| \`version\` field | ${VERSION_FIELD:-—} |"
+            echo "| \`ok\` field | ${OK_FIELD:-—} |"
+            echo "| votesA | ${VOTES_A:-—} |"
+            echo "| votesB | ${VOTES_B:-—} |"
+            echo "| winner | ${WINNER:-—} |"
+            echo "| confidence | ${CONFIDENCE:-—} |"
+            echo "| error.code | ${ERROR_CODE:-—} |"
+            echo "| error.message | ${ERROR_MSG:-—} |"
+            echo "| Conforms to published contract | $CONTRACT_CONFORMS |"
+            echo "| curl exit code | $CURL_EXIT |"
+            echo ""
+            echo "**Verdict: $VERDICT**"
+            echo ""
+            echo "_Exactly one HTTP request was made in this run, with no retries. This workflow never reruns itself — trigger it again manually only if you want another single data point._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "=== Verdict: $VERDICT ==="
+
+          rm -f "$PAYLOAD_FILE" "$BODY_FILE"
