@@ -1,6 +1,7 @@
+import { ipAddress } from "@vercel/functions";
 import { NextRequest, NextResponse } from "next/server";
-import { checkAgentAuth, getAgentKeyId } from "@/lib/agent/auth";
-import { agentRateLimiter } from "@/lib/agent/rateLimit";
+import { checkPublicAgentAccess } from "@/lib/agent/publicAccessGuard";
+import { AGENT_GLOBAL_QUOTA_KEY, agentGlobalLimiter, agentPerIpLimiter } from "@/lib/agent/rateLimit";
 import { parseDataUrl } from "@/lib/jury/parseImage";
 import { runJuryEvaluation } from "@/lib/jury/runEvaluation";
 import { evaluationRequestSchema } from "@/lib/jury/types";
@@ -14,9 +15,9 @@ const CONTRACT_VERSION = "1.0";
 const MAX_BODY_BYTES = 18 * 1024 * 1024;
 
 type ErrorCode =
-  | "NOT_CONFIGURED"
-  | "UNAUTHORIZED"
+  | "PUBLIC_ACCESS_DISABLED"
   | "RATE_LIMITED"
+  | "DAILY_QUOTA_EXCEEDED"
   | "PAYLOAD_TOO_LARGE"
   | "INVALID_JSON"
   | "INVALID_REQUEST"
@@ -59,11 +60,23 @@ async function readBodyWithLimit(req: NextRequest, maxBytes: number): Promise<st
 
 /**
  * Agent-facing evaluation endpoint. Same real evaluation engine as the
- * browser UI's /api/jury (see src/lib/jury/runEvaluation.ts) — this route
- * only adds the access control an unauthenticated, publicly-discoverable
- * endpoint needs: a shared-secret bearer token (fails closed if unset) and
- * a per-key rate limit, so autonomous callers can't consume the shared
- * OpenRouter free-tier quota the human product also depends on.
+ * browser UI's /api/jury (see src/lib/jury/runEvaluation.ts) — deliberately
+ * open, no credential. A bearer secret can't be part of a publicly
+ * discoverable AgentGraph invocation contract (that's a contradiction: a
+ * "public secret" isn't a secret), and this project doesn't yet have any
+ * legitimate self-service way for an unfamiliar external agent to obtain
+ * one, so requiring one would just mean the zero-human discovery chain
+ * dead-ends at "auth required" with no way through.
+ *
+ * Abuse/cost is bounded a different way: a deterministic kill switch tied
+ * to the configured model (see publicAccessGuard.ts) plus a per-IP and a
+ * global rolling-24h quota (see rateLimit.ts). None of this is the actual
+ * safety boundary against runaway cost — openrouter/free is $0 regardless
+ * of call volume, and OpenRouter's own infrastructure hard-enforces a
+ * project-wide 50 requests/day ceiling no matter what happens in this
+ * route. These checks exist so the agent surface can't casually consume
+ * that whole shared budget and crowd out the human UI, not to prevent a
+ * bill that structurally can't happen today.
  *
  * No CORS headers: this is meant for server-to-server agent calls, not
  * browser JS on third-party pages, and CORS wouldn't restrict a
@@ -71,29 +84,30 @@ async function readBodyWithLimit(req: NextRequest, maxBytes: number): Promise<st
  * subject to it.
  */
 export async function POST(req: NextRequest) {
-  const auth = checkAgentAuth(req);
-  if (auth === "not_configured") {
+  const access = checkPublicAgentAccess();
+  if (access === "disabled") {
     return errorResponse(
       503,
-      "NOT_CONFIGURED",
-      "The agent API is not enabled on this deployment (AGENT_API_KEY is not set).",
+      "PUBLIC_ACCESS_DISABLED",
+      "Public agent invocation is currently disabled on this deployment.",
     );
   }
-  if (auth === "unauthorized") {
-    return errorResponse(401, "UNAUTHORIZED", "Missing or invalid API key.");
+
+  const ip = ipAddress(req) ?? "unknown";
+  const perIp = agentPerIpLimiter.check(ip);
+  if (!perIp.allowed) {
+    return errorResponse(429, "RATE_LIMITED", "Per-caller rate limit exceeded. Try again later.", {
+      "Retry-After": String(perIp.retryAfterSeconds),
+    });
   }
 
-  const keyId = getAgentKeyId(req);
-  // checkAgentAuth already confirmed a valid bearer token is present, so
-  // keyId is guaranteed non-null here — this satisfies TypeScript's
-  // narrowing without changing behavior.
-  const rateLimit = agentRateLimiter.check(keyId ?? "unknown");
-  if (!rateLimit.allowed) {
+  const global = agentGlobalLimiter.check(AGENT_GLOBAL_QUOTA_KEY);
+  if (!global.allowed) {
     return errorResponse(
       429,
-      "RATE_LIMITED",
-      "Rate limit exceeded. Try again later.",
-      { "Retry-After": String(rateLimit.retryAfterSeconds) },
+      "DAILY_QUOTA_EXCEEDED",
+      "The public agent daily quota for this deployment has been reached. Try again later.",
+      { "Retry-After": String(global.retryAfterSeconds) },
     );
   }
 

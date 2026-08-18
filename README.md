@@ -67,14 +67,44 @@ var ever being passed as a model ID.
 ## Agent API
 
 `POST /api/agent/evaluate` exposes the same real evaluation engine as the
-human UI to machine callers (see `.env.example` for `AGENT_API_KEY` setup).
-It requires a Bearer token (fails closed — refuses every request with 503
-if `AGENT_API_KEY` isn't set) and applies its own per-key rate limit
-(10 requests/10 min), independent of the browser UI, so an autonomous
-caller can't exhaust the shared OpenRouter free-tier quota real users
-depend on. See `src/app/api/agent/evaluate/route.ts` for the exact
-request/response contract and `route.test.ts` alongside it for the
-auth/rate-limit/malicious-input test coverage.
+human UI to machine callers (e.g. via AgentGraph) — **deliberately with no
+credential**. A bearer secret can't be part of a publicly-discoverable
+invocation contract (a "public secret" isn't a secret), and this project
+has no self-service way yet for an unfamiliar external agent to obtain one,
+so requiring one would just dead-end the discovery → invocation chain at
+"auth required."
+
+Abuse/cost is bounded differently instead:
+- A deterministic kill switch (`src/lib/agent/publicAccessGuard.ts`): the
+  route refuses every request with 503 unless the configured model is on a
+  hardcoded known-$0 allowlist. If JURY is ever pointed at a paid model,
+  this endpoint stops working automatically — nobody has to remember to
+  touch agent-specific code when changing the model.
+- An emergency-stop env var, `AGENT_PUBLIC_ACCESS_ENABLED=false` (see
+  `.env.example`) — optional, defaults to enabled.
+- A per-IP rate limit (3 requests/10 min) and an independent global daily
+  quota (10 requests/24h), both in-memory (`src/lib/agent/rateLimit.ts`).
+
+None of this is the actual boundary against runaway cost: `openrouter/free`
+is $0 regardless of call volume, and OpenRouter's own infrastructure
+hard-enforces a 50-requests/day project-wide ceiling no matter what happens
+in this route. These checks exist so the public agent surface can't
+casually consume that whole shared budget and crowd out the human UI —
+worst case, 10 invocations/day × up to 2 model calls each (one retry) = 20
+calls/day from this endpoint, comfortably inside the 50/day shared limit.
+
+The in-memory limiters are honestly **best-effort, not a distributed
+guarantee** — each warm Vercel serverless instance holds its own counters,
+so a burst hitting multiple cold-started instances simultaneously could
+momentarily exceed the stated limits. For this first dogfood phase that's
+an acceptable gap given the $0 backstop above; a true distributed limit
+would need a shared store (Upstash Redis / Vercel KV) — worth adding if
+agent traffic grows enough for the gap to matter.
+
+See `src/app/api/agent/evaluate/route.ts` for the exact request/response
+contract and `route.test.ts` alongside it for the full test coverage
+(kill switch, both rate limits, malformed/malicious input,
+secret-leakage checks).
 
 ## Testing
 
@@ -83,11 +113,12 @@ npm test
 ```
 
 Runs the vitest suite (`src/**/*.test.ts`): route-level tests for both
-`/api/jury` and `/api/agent/evaluate` (auth, rate limiting, malformed and
-malicious input, secret-leakage checks), the shared evaluation engine's
-retry-bound behavior, and the rate limiter/auth helpers — all against a
-mocked language model (`ai/test`'s `MockLanguageModelV4`), so tests never
-make real network calls or consume the OpenRouter quota.
+`/api/jury` and `/api/agent/evaluate` (kill switch, per-IP + global rate
+limiting, malformed and malicious input, secret-leakage checks), the
+shared evaluation engine's retry-bound behavior, and the rate
+limiter/access-guard helpers — all against a mocked language model
+(`ai/test`'s `MockLanguageModelV4`), so tests never make real network
+calls or consume the OpenRouter quota.
 
 ## Stack
 

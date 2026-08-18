@@ -54,10 +54,31 @@ export function createRateLimiter({
   };
 }
 
-// Shared singleton for the agent endpoint: 10 requests per 10 minutes per
-// API key. Well within OpenRouter's free-tier ceiling, leaving generous
-// headroom for real human traffic through the browser UI.
-export const agentRateLimiter = createRateLimiter({
-  limit: 10,
+// The agent endpoint has no credential to key a limiter on (see
+// publicAccessGuard.ts for why), so it uses two independent in-memory
+// limiters instead — both best-effort/per-instance, not a distributed
+// guarantee (see the class doc above):
+//
+// - Per-IP: stops one source from burning the whole daily quota alone.
+// - Global: caps total public-agent traffic regardless of source, so this
+//   surface can't crowd out the human UI's share of the shared OpenRouter
+//   free-tier ceiling (20 req/min, 50 req/day project-wide). Deliberately
+//   a small number for this first dogfood phase — see AGENTS_README or the
+//   route for the exact figure.
+//
+// Neither of these is the actual safety boundary against runaway cost:
+// openrouter/free is $0 regardless of call volume, and OpenRouter's own
+// infrastructure enforces the 50/day ceiling no matter what happens here.
+// These limiters exist to be a good citizen toward that shared quota, not
+// to prevent a bill.
+export const agentPerIpLimiter = createRateLimiter({
+  limit: 3,
   windowMs: 10 * 60 * 1000,
 });
+
+export const agentGlobalLimiter = createRateLimiter({
+  limit: 10,
+  windowMs: 24 * 60 * 60 * 1000,
+});
+
+export const AGENT_GLOBAL_QUOTA_KEY = "global";
