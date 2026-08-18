@@ -70,6 +70,7 @@ async function readJson(res: Response) {
  */
 describe("POST /api/agent/evaluate (public, no credential)", () => {
   const originalFlag = process.env.AGENT_PUBLIC_ACCESS_ENABLED;
+  const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
 
   beforeEach(() => {
     delete process.env.AGENT_PUBLIC_ACCESS_ENABLED;
@@ -78,7 +79,10 @@ describe("POST /api/agent/evaluate (public, no credential)", () => {
   afterEach(() => {
     if (originalFlag === undefined) delete process.env.AGENT_PUBLIC_ACCESS_ENABLED;
     else process.env.AGENT_PUBLIC_ACCESS_ENABLED = originalFlag;
+    if (originalOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
     vi.doUnmock("@/lib/jury/model");
+    vi.doUnmock("@/lib/jury/runEvaluation");
     vi.resetModules();
   });
 
@@ -96,6 +100,49 @@ describe("POST /api/agent/evaluate (public, no credential)", () => {
     expect(json.version).toBe("1.0");
     expect(json.result.winner).toBe("B");
     expect(json.result.segments).toHaveLength(8);
+  });
+
+  it("turns an evaluation timeout into a clean structured 502, not a platform 504, and leaks nothing", async () => {
+    // Mocks runJuryEvaluation directly rather than waiting out the real
+    // ~40s budget: the timing/abort mechanism itself is proven separately
+    // in runEvaluation.test.ts. What this test proves is the ROUTE's own
+    // responsibility — that whatever outcome runJuryEvaluation produces
+    // (including one caused by an internal timeout) is always turned into
+    // this route's own structured JSON error, matching the published
+    // contract, rather than ever letting the platform's own 504 (bare
+    // HTML/plain text, not our schema) reach the caller.
+    process.env.OPENROUTER_API_KEY = "fake-openrouter-key-for-tests";
+    vi.doMock("@/lib/jury/model", () => ({
+      MODEL: new MockLanguageModelV4({ doGenerate: async () => mockGenerateResult(VALID_JURY_JSON) }),
+      SELECTED_MODEL_ID: "openrouter/free",
+    }));
+    vi.doMock("@/lib/jury/runEvaluation", () => ({
+      runJuryEvaluation: async () => ({
+        ok: false,
+        message:
+          "The jury couldn't reach a verdict right now. Please try again in a moment — if this keeps happening, the deployment's AI setup needs attention.",
+      }),
+    }));
+    vi.resetModules();
+    const { POST } = await import("./route");
+
+    const start = Date.now();
+    const res = await POST(
+      makeRequest({ body: { context: "dating", imageA: TINY_PNG, imageB: TINY_PNG } }),
+    );
+    const elapsed = Date.now() - start;
+    const text = await res.text();
+
+    expect(res.status).toBe(502);
+    expect(elapsed).toBeLessThan(1000);
+    const json = JSON.parse(text);
+    expect(json).toEqual({
+      ok: false,
+      version: "1.0",
+      error: { code: "UPSTREAM_ERROR", message: expect.any(String) },
+    });
+    expect(text).not.toContain("fake-openrouter-key-for-tests");
+    expect(text.toLowerCase()).not.toContain("<html");
   });
 
   it("returns 503 PUBLIC_ACCESS_DISABLED when the model isn't on the known-free allowlist", async () => {
