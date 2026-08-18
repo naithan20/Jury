@@ -1,0 +1,141 @@
+name: JURY Idea Endpoint Production Health Check (manual, single request)
+
+# Manual-only, single-shot production health check for
+# POST https://tryjury.vercel.app/api/agent/evaluate-idea — the new
+# free-text idea/decision evaluation capability. Mirrors
+# jury-prod-health-check.yml's guarantees exactly (see that file for the
+# fuller rationale): workflow_dispatch only, exactly one HTTP request per
+# run, no retries, no AgentGraph involvement, no application code or env
+# vars touched here.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jury-idea-prod-health-check
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Make exactly one request to the live idea-evaluation endpoint
+        run: |
+          set -uo pipefail
+
+          PAYLOAD_FILE=$(mktemp)
+          BODY_FILE=$(mktemp)
+          jq -n \
+            --arg subject "An online marketplace where AI agents can discover other AI agents and capabilities based on natural-language tasks." \
+            --arg goal "Should this idea be pursued?" \
+            '{subject: $subject, evaluationGoal: $goal}' > "$PAYLOAD_FILE"
+
+          # Exactly ONE request: no --retry, no loop, no matrix. --max-time
+          # bounds this single attempt to just past the route's own 60s
+          # maxDuration.
+          CURL_EXIT=0
+          HTTP_META=$(curl -sS -o "$BODY_FILE" \
+            -w '%{http_code}|%{time_total}|%{content_type}' \
+            --max-time 65 \
+            -X POST "https://tryjury.vercel.app/api/agent/evaluate-idea" \
+            -H "Content-Type: application/json" \
+            --data "@$PAYLOAD_FILE") || CURL_EXIT=$?
+
+          HTTP_CODE=$(cut -d'|' -f1 <<< "$HTTP_META")
+          TIME_TOTAL=$(cut -d'|' -f2 <<< "$HTTP_META")
+          CONTENT_TYPE=$(cut -d'|' -f3 <<< "$HTTP_META")
+
+          IS_JSON="no"
+          OK_FIELD=""
+          VERDICT_TEXT=""
+          RECOMMENDATION=""
+          CONFIDENCE=""
+          PANEL_LEN=""
+          ERROR_CODE=""
+          ERROR_MSG=""
+
+          if grep -qi "application/json" <<< "$CONTENT_TYPE"; then
+            IS_JSON="yes"
+            OK_FIELD=$(jq -r 'if has("ok") then (.ok|tostring) else "missing" end' "$BODY_FILE" 2>/dev/null || echo "unparseable")
+            VERDICT_TEXT=$(jq -r '.result.verdict // empty' "$BODY_FILE" 2>/dev/null)
+            RECOMMENDATION=$(jq -r '.result.recommendation // empty' "$BODY_FILE" 2>/dev/null)
+            CONFIDENCE=$(jq -r '.result.confidence // empty' "$BODY_FILE" 2>/dev/null)
+            PANEL_LEN=$(jq -r '.result.panel | length? // empty' "$BODY_FILE" 2>/dev/null)
+            ERROR_CODE=$(jq -r '.error.code // empty' "$BODY_FILE" 2>/dev/null)
+            ERROR_MSG=$(jq -r '.error.message // empty' "$BODY_FILE" 2>/dev/null)
+          fi
+
+          VERSION_FIELD=$(jq -r '.version // empty' "$BODY_FILE" 2>/dev/null)
+
+          # Response-shape check against the published contract: success is
+          # {ok:true, version, result:{verdict, recommendation, confidence,
+          # panel[8], ...}}, failure is {ok:false, version, error:{code,
+          # message}}.
+          CONTRACT_CONFORMS="no"
+          GENUINE_RESULT="no"
+          if [ "$IS_JSON" = "yes" ] && [ -n "$VERSION_FIELD" ]; then
+            if [ "$OK_FIELD" = "true" ] && [ -n "$RECOMMENDATION" ] && [ "$PANEL_LEN" = "8" ]; then
+              CONTRACT_CONFORMS="yes"
+              GENUINE_RESULT="yes"
+            elif [ "$OK_FIELD" = "false" ] && [ -n "$ERROR_CODE" ]; then
+              CONTRACT_CONFORMS="yes"
+            fi
+          fi
+
+          QUOTA_ISSUE="no"
+          if [ "$HTTP_CODE" = "429" ]; then
+            QUOTA_ISSUE="yes ($ERROR_CODE)"
+          fi
+
+          VERDICT="UNKNOWN"
+          if [ "$CURL_EXIT" != "0" ]; then
+            VERDICT="REQUEST_FAILED (curl exit $CURL_EXIT — connection-level failure, DNS/TLS error, or hit the 65s client-side cap before any HTTP response)"
+          elif [ "$HTTP_CODE" = "200" ] && [ "$GENUINE_RESULT" = "yes" ]; then
+            VERDICT="ENDPOINT_HEALTHY — 200 with a genuine multi-perspective IdeaResult"
+          elif [ "$HTTP_CODE" = "502" ] && [ "$ERROR_CODE" = "UPSTREAM_ERROR" ]; then
+            VERDICT="TIMEOUT_CONTROL_WORKING_BUT_UPSTREAM_UNHEALTHY — structured 502 returned before any platform timeout"
+          elif [ "$HTTP_CODE" = "504" ]; then
+            VERDICT="PLATFORM_TIMEOUT — raw/bare 504 (not our structured error)"
+          elif [ "$HTTP_CODE" = "429" ]; then
+            VERDICT="RATE_LIMITED_OR_QUOTA — 429 ($ERROR_CODE), do not retry"
+          elif [ "$HTTP_CODE" = "503" ] && [ "$ERROR_CODE" = "PUBLIC_ACCESS_DISABLED" ]; then
+            VERDICT="PUBLIC_ACCESS_INTENTIONALLY_DISABLED — 503 kill switch is on"
+          else
+            VERDICT="UNEXPECTED_RESPONSE — see fields above, does not match a known outcome bucket"
+          fi
+
+          {
+            echo "## JURY /api/agent/evaluate-idea production health check — single request result"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| HTTP status | $HTTP_CODE |"
+            echo "| Total duration | ${TIME_TOTAL}s |"
+            echo "| Content-Type | $CONTENT_TYPE |"
+            echo "| Response looked like JSON | $IS_JSON |"
+            echo "| \`version\` field | ${VERSION_FIELD:-—} |"
+            echo "| \`ok\` field | ${OK_FIELD:-—} |"
+            echo "| Genuine IdeaResult (recommendation + 8-entry panel) | $GENUINE_RESULT |"
+            echo "| recommendation | ${RECOMMENDATION:-—} |"
+            echo "| confidence | ${CONFIDENCE:-—} |"
+            echo "| panel length | ${PANEL_LEN:-—} |"
+            echo "| verdict (result.verdict, truncated) | $(echo "${VERDICT_TEXT:-—}" | cut -c1-160) |"
+            echo "| error.code | ${ERROR_CODE:-—} |"
+            echo "| error.message | ${ERROR_MSG:-—} |"
+            echo "| Conforms to published contract | $CONTRACT_CONFORMS |"
+            echo "| Quota/rate-limit issue observed | $QUOTA_ISSUE |"
+            echo "| curl exit code | $CURL_EXIT |"
+            echo ""
+            echo "**Outcome bucket: $VERDICT**"
+            echo ""
+            echo "_Note on retries: whether the server internally retried once on a parse failure is not observable from outside (no such signal is in the HTTP response by design — the contract doesn't leak internal attempt counts). That behavior (single bounded retry, maxRetries:0 for the SDK's own hidden retry/backoff) is verified separately by automated tests in runIdeaEvaluation.test.ts, not by this external check._"
+            echo ""
+            echo "_Exactly one HTTP request was made in this run, with no retries. This workflow never reruns itself — trigger it again manually only if you want another single data point._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "=== Outcome bucket: $VERDICT ==="
+
+          rm -f "$PAYLOAD_FILE" "$BODY_FILE"
