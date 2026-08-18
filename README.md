@@ -106,6 +106,56 @@ contract and `route.test.ts` alongside it for the full test coverage
 (kill switch, both rate limits, malformed/malicious input,
 secret-leakage checks).
 
+### Idea/decision evaluation: `POST /api/agent/evaluate-idea`
+
+A second, separate machine capability: free-text multi-perspective
+evaluation of an idea, decision, proposal, or piece of content — the
+capability an AgentGraph discovery pass expects from JURY's listing but the
+image-comparison endpoint above can't actually provide. Same public,
+credential-free, `openrouter/free`-only design as `/api/agent/evaluate`,
+completely separate route/schema/evaluation engine
+(`src/lib/jury/runIdeaEvaluation.ts`) — the image endpoint is untouched by
+this addition.
+
+Request: `{ subject: string (10–2000 chars), evaluationGoal?: string (≤300 chars) }`.
+Response: the same 8-persona-panel philosophy reinterpreted for
+idea evaluation — `verdict`, `recommendation`
+(`pursue` / `pursue_with_changes` / `do_not_pursue` / `insufficient_information`),
+`confidence`, a `panel` of 8 per-persona stances, `argumentsFor` /
+`argumentsAgainst`, `disagreements` between personas, `overlookedRisks` /
+`overlookedOpportunities`, `nextSteps`, `keyUnknowns`, and a fixed
+server-side `disclaimer` string (never model-generated, so it can't be
+reworded or dropped).
+
+Free text is a different threat model than images, so this endpoint adds:
+- **Prompt-injection resistance**: `subject`/`evaluationGoal` are wrapped in
+  explicit `SUBJECT_START`/`SUBJECT_END` and `GOAL_START`/`GOAL_END`
+  markers in the prompt, with the system prompt explicitly instructing the
+  model to treat everything inside them as data to evaluate, never as
+  instructions — including text that looks like "ignore previous
+  instructions" or role/schema-override attempts. The output is still
+  forced through the real zod schema regardless of what the model returns,
+  so even a successful injection against the model can't change the
+  response shape.
+- **Bounded input**: zod enforces the character caps above; the route also
+  reads the request body with its own running byte-count cap (32KB) before
+  ever calling `JSON.parse`, independent of what any `Content-Length`
+  header claims.
+- **Shared quota, not a second one**: this endpoint reuses the exact same
+  `agentPerIpLimiter` and `agentGlobalLimiter` singletons as
+  `/api/agent/evaluate` (see `src/lib/agent/rateLimit.ts`) rather than
+  getting an independent daily quota — both routes draw from the same
+  shared OpenRouter free-tier ceiling, so a second independent quota here
+  would let combined agent traffic approach double the intended share of
+  it. It also shares the same deterministic kill switch
+  (`publicAccessGuard.ts`) and the same 40s overall invocation budget /
+  `maxRetries: 0` / `AbortSignal.timeout` pattern as the image endpoint.
+
+See `src/app/api/agent/evaluate-idea/route.ts` and its `route.test.ts` for
+the exact contract and full test coverage (valid evaluation, empty/oversized
+input, injection-as-data, kill switch, shared rate limits, no secret
+leakage).
+
 ## Testing
 
 ```bash
