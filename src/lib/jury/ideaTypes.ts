@@ -28,8 +28,12 @@ const PERSONA_ID_ENUM = PERSONAS.map((p) => p.id) as [PersonaId, ...PersonaId[]]
 
 // Bounded array lengths throughout: this is what actually caps output
 // tokens (and therefore latency/cost) regardless of how verbose the model
-// tries to be — not just a data-quality nicety.
-const shortPoint = () => z.string().min(1).max(220);
+// tries to be — not just a data-quality nicety. 140 chars matches the
+// image schema's proven-working segments[].note cap — the idea schema has
+// far more of these (up to 8 panel entries + 7 more bounded arrays vs. the
+// image schema's single 8-entry array), so keeping each one terse matters
+// more here, not less.
+const shortPoint = () => z.string().min(1).max(140);
 
 export const ideaResultSchema = z.object({
   verdict: z
@@ -50,7 +54,7 @@ export const ideaResultSchema = z.object({
         stance: z
           .enum(["supportive", "skeptical", "mixed"])
           .describe("This persona's overall stance toward the idea"),
-        note: z.string().max(200).describe("This persona's key point, in their own lens"),
+        note: z.string().max(140).describe("This persona's key point, in their own lens"),
       }),
     )
     .length(8)
@@ -58,37 +62,37 @@ export const ideaResultSchema = z.object({
   argumentsFor: z
     .array(shortPoint())
     .min(1)
-    .max(5)
+    .max(3)
     .describe("Strongest concrete arguments in favor, distinct from each other"),
   argumentsAgainst: z
     .array(shortPoint())
     .min(1)
-    .max(5)
+    .max(3)
     .describe("Strongest concrete arguments against, distinct from each other"),
   disagreements: z
     .array(shortPoint())
     .min(1)
-    .max(4)
+    .max(2)
     .describe("Where the personas genuinely diverge and why, not just restating for/against"),
   overlookedRisks: z
     .array(shortPoint())
     .min(1)
-    .max(4)
+    .max(2)
     .describe("Risks or downsides a naive read of the idea would likely miss"),
   overlookedOpportunities: z
     .array(shortPoint())
     .min(1)
-    .max(4)
+    .max(2)
     .describe("Upsides or adjacent opportunities a naive read of the idea would likely miss"),
   nextSteps: z
     .array(shortPoint())
     .min(1)
-    .max(5)
+    .max(3)
     .describe("Concrete, practical next actions to de-risk or validate the idea"),
   keyUnknowns: z
     .array(shortPoint())
     .min(1)
-    .max(5)
+    .max(3)
     .describe("Specific open questions whose answers would most change the recommendation"),
 });
 

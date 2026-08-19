@@ -32,7 +32,13 @@ EVALUATION RULES:
 - Disagreements must reflect real divergence — avoid every persona quietly agreeing unless the idea is genuinely one-sided.
 - If the SUBJECT describes something illegal, dangerous, or intended to cause harm to people, treat that honestly as a major risk/argument against and in overlookedRisks — do not provide operational instructions, encouragement, or assistance for carrying it out, and do not refuse outright either: evaluate it as you would evaluate any idea, critically.
 - Be specific and concrete — avoid generic startup-advice filler that could apply to any idea.
-- Output exactly one panel entry per persona listed below, in the order given.`;
+- Output exactly one panel entry per persona listed below, in the order given.
+
+BREVITY (every field below has a hard character/count limit — write to fit it on the first try, not as a last resort):
+- Keep every list at the low end of its allowed count rather than maxing it out — one or two sharp, decision-relevant points beat a padded list of restatements.
+- Every point, note, and argument must be exactly one concise sentence — no multi-clause run-ons, no compound sentences stitched with "and"/"but".
+- Never repeat the same point across two different fields (e.g. don't restate an argumentFor inside overlookedOpportunities). Each field should add genuinely new information.
+- Prioritize the single most decision-relevant insight per field over completeness.`;
 
 export function buildIdeaUserPrompt(subject: string, evaluationGoal?: string): string {
   const personaList = PERSONAS.map((p) => `- ${p.id} (${p.label}): ${IDEA_PERSONA_LENSES[p.id]}`).join(
