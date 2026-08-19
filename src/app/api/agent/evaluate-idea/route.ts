@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { checkPublicAgentAccess } from "@/lib/agent/publicAccessGuard";
 import { AGENT_GLOBAL_QUOTA_KEY, agentGlobalLimiter, agentPerIpLimiter } from "@/lib/agent/rateLimit";
 import { ideaEvaluationRequestSchema } from "@/lib/jury/ideaTypes";
-import { runIdeaEvaluation } from "@/lib/jury/runIdeaEvaluation";
+import { runIdeaEvaluation, type IdeaEvaluationDiagnostics } from "@/lib/jury/runIdeaEvaluation";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -25,11 +25,39 @@ type ErrorCode =
   | "INVALID_REQUEST"
   | "UPSTREAM_ERROR";
 
-function errorResponse(status: number, code: ErrorCode, message: string, extraHeaders?: HeadersInit) {
+function errorResponse(
+  status: number,
+  code: ErrorCode,
+  message: string,
+  extraHeaders?: HeadersInit,
+  diagnostics?: IdeaEvaluationDiagnostics,
+) {
   return NextResponse.json(
-    { ok: false, version: CONTRACT_VERSION, error: { code, message } },
+    {
+      ok: false,
+      version: CONTRACT_VERSION,
+      error: { code, message },
+      ...(diagnostics ? { diagnostics } : {}),
+    },
     { status, headers: extraHeaders },
   );
+}
+
+/**
+ * TEMPORARY: whether to echo runIdeaEvaluation's safe diagnostic metadata
+ * (attempt timings, error classification — never secrets/prompts/content,
+ * see runIdeaEvaluation.ts) back in an UPSTREAM_ERROR response. Off by
+ * default for every normal caller (including AgentGraph) — this never
+ * changes the documented public contract unless BOTH:
+ *  1. the caller explicitly opts in via the X-Jury-Diagnostics header, AND
+ *  2. AGENT_IDEA_DIAGNOSTICS_ENABLED hasn't been explicitly set to "false"
+ *     (the kill switch for turning this off instantly without a redeploy
+ *     once the live-invocation diagnosis this exists for is done).
+ * Candidate for removal entirely once the current investigation concludes.
+ */
+function diagnosticsRequested(req: NextRequest): boolean {
+  if (process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED === "false") return false;
+  return Boolean(req.headers.get("x-jury-diagnostics"));
 }
 
 /**
@@ -134,7 +162,13 @@ export async function POST(req: NextRequest) {
   );
 
   if (!outcome.ok) {
-    return errorResponse(502, "UPSTREAM_ERROR", outcome.message);
+    return errorResponse(
+      502,
+      "UPSTREAM_ERROR",
+      outcome.message,
+      undefined,
+      diagnosticsRequested(req) ? outcome.diagnostics : undefined,
+    );
   }
 
   return NextResponse.json({ ok: true, version: CONTRACT_VERSION, result: outcome.result });

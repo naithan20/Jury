@@ -7,6 +7,14 @@ name: JURY Idea Endpoint Production Health Check (manual, single request)
 # fuller rationale): workflow_dispatch only, exactly one HTTP request per
 # run, no retries, no AgentGraph involvement, no application code or env
 # vars touched here.
+#
+# Sends the opt-in X-Jury-Diagnostics header so that IF this single request
+# fails with a 502, the response includes runIdeaEvaluation.ts's safe
+# per-attempt diagnostic classification (error name/type, abort/timeout,
+# finishReason, timings — never secrets/prompts/model content) directly in
+# this run's job summary. This exists because Vercel's own function-log
+# retention on the free plan is too short (~1h) to inspect after the fact —
+# see route.ts's diagnosticsRequested() for the exact opt-in gate.
 on:
   workflow_dispatch: {}
 
@@ -42,6 +50,7 @@ jobs:
             --max-time 65 \
             -X POST "https://tryjury.vercel.app/api/agent/evaluate-idea" \
             -H "Content-Type: application/json" \
+            -H "X-Jury-Diagnostics: 1" \
             --data "@$PAYLOAD_FILE") || CURL_EXIT=$?
 
           HTTP_CODE=$(cut -d'|' -f1 <<< "$HTTP_META")
@@ -90,6 +99,43 @@ jobs:
             QUOTA_ISSUE="yes ($ERROR_CODE)"
           fi
 
+          # Safe diagnostic classification (see runIdeaEvaluation.ts) — only
+          # present when this request failed AND the server had diagnostics
+          # enabled. Never contains secrets/prompts/model-generated text.
+          HAS_DIAGNOSTICS="no"
+          DIAG_TOTAL_ELAPSED=""
+          DIAG_RETRY_TRIGGERED=""
+          DIAG_SECOND_ATTEMPT=""
+          DIAG_BUDGET_EXHAUSTED_BEFORE=""
+          DIAG_ATTEMPTS_TABLE=""
+          FAILURE_CATEGORY="—"
+          if [ "$IS_JSON" = "yes" ] && jq -e '.diagnostics' "$BODY_FILE" >/dev/null 2>&1; then
+            HAS_DIAGNOSTICS="yes"
+            DIAG_TOTAL_ELAPSED=$(jq -r '.diagnostics.totalElapsedMs // empty' "$BODY_FILE")
+            DIAG_RETRY_TRIGGERED=$(jq -r '.diagnostics.outerRetryTriggered // false' "$BODY_FILE")
+            DIAG_SECOND_ATTEMPT=$(jq -r '.diagnostics.secondAttemptStarted // false' "$BODY_FILE")
+            DIAG_BUDGET_EXHAUSTED_BEFORE=$(jq -r '.diagnostics.budgetExhaustedBeforeAttempt // empty' "$BODY_FILE")
+            DIAG_ATTEMPTS_TABLE=$(jq -r '
+              (.diagnostics.attempts // [])[]
+              | "| \(.attempt) | \(.elapsedMs)ms | \(.remainingBudgetMsAtStart)ms | \(.errorName // "—") | \(.isAINoObjectGeneratedError) | \(.isAPICallError) | \(.apiCallStatusCode // "—") | \(.abortTimedOut) | \(.finishReason // "—") |"
+            ' "$BODY_FILE")
+            FAILURE_CATEGORY=$(jq -r '
+              (.diagnostics.attempts // []) as $a
+              | if ($a | any(.abortTimedOut == true))
+                  then "A — upstream/model never completed before the deadline (AbortSignal.timeout fired)"
+                elif ($a | any(.isAINoObjectGeneratedError == true and .finishReason == "length"))
+                  then "C — output was truncated/token-limited (finishReason=length)"
+                elif ($a | any(.isAINoObjectGeneratedError == true))
+                  then "B — structured output was returned but could not be parsed/validated against the schema"
+                elif ($a | any(.isAPICallError == true))
+                  then "D — OpenRouter/provider returned an explicit HTTP/API error"
+                elif ($a | length) == 0
+                  then "E — no attempt even started (budget exhausted before attempt 1 — see budgetExhaustedBeforeAttempt)"
+                else "E — another/unclear cause; see the raw attempts table"
+                end
+            ' "$BODY_FILE")
+          fi
+
           VERDICT="UNKNOWN"
           if [ "$CURL_EXIT" != "0" ]; then
             VERDICT="REQUEST_FAILED (curl exit $CURL_EXIT — connection-level failure, DNS/TLS error, or hit the 65s client-side cap before any HTTP response)"
@@ -131,11 +177,39 @@ jobs:
             echo ""
             echo "**Outcome bucket: $VERDICT**"
             echo ""
-            echo "_Note on retries: whether the server internally retried once on a parse failure is not observable from outside (no such signal is in the HTTP response by design — the contract doesn't leak internal attempt counts). That behavior (single bounded retry, maxRetries:0 for the SDK's own hidden retry/backoff) is verified separately by automated tests in runIdeaEvaluation.test.ts, not by this external check._"
+            if [ "$HAS_DIAGNOSTICS" = "yes" ]; then
+              echo "### Diagnostic classification (opt-in, this run only)"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Total elapsed (server-measured) | ${DIAG_TOTAL_ELAPSED:-—}ms |"
+              echo "| Outer retry triggered | ${DIAG_RETRY_TRIGGERED} |"
+              echo "| Second attempt started | ${DIAG_SECOND_ATTEMPT} |"
+              echo "| Budget exhausted before attempt # | ${DIAG_BUDGET_EXHAUSTED_BEFORE:-—} |"
+              echo ""
+              echo "| Attempt | Elapsed | Remaining budget at start | error.name | NoObjectGeneratedError | APICallError | statusCode | Abort/timeout fired | finishReason |"
+              echo "|---|---|---|---|---|---|---|---|---|"
+              if [ -n "$DIAG_ATTEMPTS_TABLE" ]; then
+                echo "$DIAG_ATTEMPTS_TABLE"
+              else
+                echo "| — | no attempt started — see \"Budget exhausted before attempt #\" above | | | | | | | |"
+              fi
+              echo ""
+              echo "**Definitive failure category: $FAILURE_CATEGORY**"
+            else
+              echo "_No diagnostics in this response — either the request succeeded, diagnostics were disabled server-side (AGENT_IDEA_DIAGNOSTICS_ENABLED=false), or the deployment doesn't yet include this instrumentation._"
+            fi
+            echo ""
+            echo "_Note on retries: this run's diagnostics (above, when present) directly report whether the outer retry fired and whether a second attempt started — this is no longer inferred from timing alone._"
             echo ""
             echo "_Exactly one HTTP request was made in this run, with no retries. This workflow never reruns itself — trigger it again manually only if you want another single data point._"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "=== Outcome bucket: $VERDICT ==="
+          if [ "$HAS_DIAGNOSTICS" = "yes" ]; then
+            echo "=== Failure category: $FAILURE_CATEGORY ==="
+            echo "=== Diagnostics: totalElapsedMs=$DIAG_TOTAL_ELAPSED retryTriggered=$DIAG_RETRY_TRIGGERED secondAttemptStarted=$DIAG_SECOND_ATTEMPT budgetExhaustedBeforeAttempt=${DIAG_BUDGET_EXHAUSTED_BEFORE:-none} ==="
+            echo "=== Attempts: $(jq -c '.diagnostics.attempts // []' "$BODY_FILE") ==="
+          fi
 
           rm -f "$PAYLOAD_FILE" "$BODY_FILE"

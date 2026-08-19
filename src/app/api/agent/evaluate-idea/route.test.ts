@@ -65,8 +65,11 @@ describe("POST /api/agent/evaluate-idea (public, no credential)", () => {
   const originalFlag = process.env.AGENT_PUBLIC_ACCESS_ENABLED;
   const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
 
+  const originalDiagnosticsFlag = process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED;
+
   beforeEach(() => {
     delete process.env.AGENT_PUBLIC_ACCESS_ENABLED;
+    delete process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED;
   });
 
   afterEach(() => {
@@ -74,6 +77,8 @@ describe("POST /api/agent/evaluate-idea (public, no credential)", () => {
     else process.env.AGENT_PUBLIC_ACCESS_ENABLED = originalFlag;
     if (originalOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
+    if (originalDiagnosticsFlag === undefined) delete process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED;
+    else process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED = originalDiagnosticsFlag;
     vi.doUnmock("@/lib/jury/model");
     vi.doUnmock("@/lib/jury/runIdeaEvaluation");
     vi.resetModules();
@@ -274,6 +279,89 @@ describe("POST /api/agent/evaluate-idea (public, no credential)", () => {
     expect(text).not.toContain("fake-openrouter-key-for-tests");
     expect(text.toLowerCase()).not.toContain("<html");
     expect(text.toLowerCase()).not.toContain("stack");
+  });
+
+  describe("temporary opt-in diagnostics on UPSTREAM_ERROR", () => {
+    const FAILING_DIAGNOSTICS = {
+      totalElapsedMs: 40123,
+      attempts: [
+        {
+          attempt: 1,
+          remainingBudgetMsAtStart: 40000,
+          elapsedMs: 40001,
+          errorName: "AbortError",
+          isAINoObjectGeneratedError: false,
+          isAPICallError: false,
+          abortTimedOut: true,
+        },
+      ],
+      outerRetryTriggered: false,
+      secondAttemptStarted: false,
+    };
+
+    function mockFailingIdeaEvaluation() {
+      vi.doMock("@/lib/jury/runIdeaEvaluation", () => ({
+        runIdeaEvaluation: async () => ({
+          ok: false,
+          message: "The panel couldn't reach a verdict right now.",
+          diagnostics: FAILING_DIAGNOSTICS,
+        }),
+      }));
+    }
+
+    it("omits diagnostics by default, even on a 502, when the header is absent", async () => {
+      mockFreeModel();
+      mockFailingIdeaEvaluation();
+      vi.resetModules();
+      const { POST } = await import("./route");
+
+      const res = await POST(makeRequest({ body: { subject: VALID_SUBJECT } }));
+      expect(res.status).toBe(502);
+      const json = await readJson(res);
+      expect(json).not.toHaveProperty("diagnostics");
+    });
+
+    it("includes diagnostics on a 502 when the caller sends X-Jury-Diagnostics", async () => {
+      mockFreeModel();
+      mockFailingIdeaEvaluation();
+      vi.resetModules();
+      const { POST } = await import("./route");
+
+      const res = await POST(
+        makeRequest({ body: { subject: VALID_SUBJECT }, headers: { "X-Jury-Diagnostics": "1" } }),
+      );
+      expect(res.status).toBe(502);
+      const json = await readJson(res);
+      expect(json.diagnostics).toEqual(FAILING_DIAGNOSTICS);
+    });
+
+    it("never includes diagnostics on a 200 success, header or not", async () => {
+      mockFreeModel();
+      vi.resetModules();
+      const { POST } = await import("./route");
+
+      const res = await POST(
+        makeRequest({ body: { subject: VALID_SUBJECT }, headers: { "X-Jury-Diagnostics": "1" } }),
+      );
+      expect(res.status).toBe(200);
+      const json = await readJson(res);
+      expect(json).not.toHaveProperty("diagnostics");
+    });
+
+    it("respects the AGENT_IDEA_DIAGNOSTICS_ENABLED=false kill switch even when the header is sent", async () => {
+      process.env.AGENT_IDEA_DIAGNOSTICS_ENABLED = "false";
+      mockFreeModel();
+      mockFailingIdeaEvaluation();
+      vi.resetModules();
+      const { POST } = await import("./route");
+
+      const res = await POST(
+        makeRequest({ body: { subject: VALID_SUBJECT }, headers: { "X-Jury-Diagnostics": "1" } }),
+      );
+      expect(res.status).toBe(502);
+      const json = await readJson(res);
+      expect(json).not.toHaveProperty("diagnostics");
+    });
   });
 
   it("enforces the per-IP rate limit (429 RATE_LIMITED) but isolates other IPs", async () => {

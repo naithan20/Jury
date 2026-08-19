@@ -214,3 +214,111 @@ describe("runIdeaEvaluation prompt-injection resistance", () => {
     }
   });
 });
+
+describe("runIdeaEvaluation safe diagnostic instrumentation", () => {
+  it("records a single clean attempt with no error fields on immediate success", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    doGenerate = async () => mockGenerateResult(VALID_IDEA_JSON);
+
+    const outcome = await runIdeaEvaluation({ subject: "A subscription box for rare houseplants." }, "agent");
+
+    expect(outcome.diagnostics.attempts).toHaveLength(1);
+    expect(outcome.diagnostics.attempts[0]).toMatchObject({
+      attempt: 1,
+      isAINoObjectGeneratedError: false,
+      isAPICallError: false,
+      abortTimedOut: false,
+    });
+    expect(outcome.diagnostics.outerRetryTriggered).toBe(false);
+    expect(outcome.diagnostics.secondAttemptStarted).toBe(false);
+    expect(outcome.diagnostics.budgetExhaustedBeforeAttempt).toBeUndefined();
+    expect(outcome.diagnostics.totalElapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("classifies a genuine parse failure as AI_NoObjectGeneratedError and records the retry", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    let calls = 0;
+    doGenerate = async () => {
+      calls++;
+      return mockGenerateResult(calls === 1 ? "not valid json {{{" : VALID_IDEA_JSON);
+    };
+
+    const outcome = await runIdeaEvaluation({ subject: "A subscription box for rare houseplants." }, "agent");
+
+    expect(outcome.diagnostics.attempts).toHaveLength(2);
+    expect(outcome.diagnostics.attempts[0].isAINoObjectGeneratedError).toBe(true);
+    expect(outcome.diagnostics.attempts[0].errorName).toBe("AI_NoObjectGeneratedError");
+    expect(outcome.diagnostics.attempts[0].abortTimedOut).toBe(false);
+    expect(outcome.diagnostics.outerRetryTriggered).toBe(true);
+    expect(outcome.diagnostics.secondAttemptStarted).toBe(true);
+  });
+
+  it("classifies an aborted/timed-out attempt distinctly from a parse failure", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    doGenerate = (options) => slowResult(10_000, options);
+
+    const outcome = await runIdeaEvaluation(
+      { subject: "A subscription box for rare houseplants." },
+      "agent",
+      { totalBudgetMs: 300, minAttemptBudgetMs: 50 },
+    );
+
+    expect(outcome.diagnostics.attempts).toHaveLength(1);
+    expect(outcome.diagnostics.attempts[0].abortTimedOut).toBe(true);
+    expect(outcome.diagnostics.attempts[0].isAINoObjectGeneratedError).toBe(false);
+    expect(outcome.diagnostics.secondAttemptStarted).toBe(false);
+  });
+
+  it("records budgetExhaustedBeforeAttempt when the second attempt is skipped for lack of remaining budget", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    doGenerate = (options) => slowResult(180, options).then(() => mockGenerateResult("not valid json {{{"));
+
+    const outcome = await runIdeaEvaluation(
+      { subject: "A subscription box for rare houseplants." },
+      "agent",
+      { totalBudgetMs: 200, minAttemptBudgetMs: 50 },
+    );
+
+    expect(outcome.diagnostics.attempts).toHaveLength(1);
+    expect(outcome.diagnostics.secondAttemptStarted).toBe(false);
+    expect(outcome.diagnostics.budgetExhaustedBeforeAttempt).toBe(2);
+  });
+
+  it("classifies a provider APICallError with its statusCode, distinct from a parse failure or abort", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    class FakeAPICallError extends Error {
+      statusCode = 500;
+      constructor(message: string) {
+        super(message);
+        this.name = "APICallError";
+      }
+    }
+    doGenerate = async () => {
+      throw new FakeAPICallError("Simulated upstream 500");
+    };
+
+    const outcome = await runIdeaEvaluation({ subject: "A subscription box for rare houseplants." }, "agent");
+
+    expect(outcome.diagnostics.attempts).toHaveLength(1);
+    expect(outcome.diagnostics.attempts[0]).toMatchObject({
+      errorName: "APICallError",
+      isAPICallError: true,
+      apiCallStatusCode: 500,
+      isAINoObjectGeneratedError: false,
+      abortTimedOut: false,
+    });
+    // Not a retryable parse failure — exactly one attempt, no retry.
+    expect(outcome.diagnostics.outerRetryTriggered).toBe(false);
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("never puts the model-generated text or the raw error message into diagnostics", async () => {
+    const { runIdeaEvaluation } = await import("./runIdeaEvaluation");
+    doGenerate = async () => mockGenerateResult("SECRET_MODEL_TEXT_MARKER {{{ not valid json");
+
+    const outcome = await runIdeaEvaluation({ subject: "A subscription box for rare houseplants." }, "agent");
+
+    const serialized = JSON.stringify(outcome.diagnostics);
+    expect(serialized).not.toContain("SECRET_MODEL_TEXT_MARKER");
+  });
+});
