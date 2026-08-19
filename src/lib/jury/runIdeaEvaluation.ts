@@ -187,7 +187,7 @@ export async function runIdeaEvaluation(
             ? IDEA_SYSTEM_PROMPT
             : `${IDEA_SYSTEM_PROMPT}\n\nCRITICAL: Reply with ONLY the JSON object matching the schema. No markdown, no code fences, no commentary before or after it.`,
         messages,
-        maxOutputTokens: 1800,
+        maxOutputTokens: 2400,
         temperature: attempt === 0 ? 0.8 : 0.4,
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(remainingMs),
